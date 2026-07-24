@@ -1,164 +1,284 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ — Applied AI System (RAG + Safety Guardrails)
 
-You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
+**CodePath AI110 · Project 4: "Show What You Know: Applied AI System"**
 
-## Scenario
+An Applied-AI extension of the Module 2 project **PawPal+**. It adds a
+retrieval-grounded pet-care advice agent with a safety-first toxicity
+guardrail, structured logging, and reproducible execution evidence.
 
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
+---
 
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
+## 1. Base Project Summary
 
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
+**Base project:** PawPal+ (CodePath AI110 **Module 2**).
 
-## What you will build
+PawPal+ started as a **Streamlit pet-care task scheduler**. Its original goal
+was to help a busy pet owner stay consistent with care tasks (walks, feeding,
+medication, grooming) by:
 
-Your final app should:
+- modelling the domain with four classes — `Owner`, `Pet`, `Task`, `Scheduler`
+  (see [pawpal_system.py](pawpal_system.py) and [uml.mmd](uml.mmd));
+- **sorting** tasks chronologically, **filtering** by status/pet, and
+  **detecting scheduling conflicts** (two tasks at the same time);
+- exposing all of this through a Streamlit UI ([app.py](app.py)), backed by a
+  21-test pytest suite ([tests/test_pawpal.py](tests/test_pawpal.py)).
 
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
+Module 2 answered *"**when** should I do my pet-care tasks?"*
 
-## Getting started
+### From Module 2 → Applied AI System
 
-### Setup
+Project 4 keeps that scheduling core untouched and adds an AI advice layer that
+answers a different question: *"**what** should I do, and **is it safe?**"*
+
+| | Module 2 (base) | Project 4 (Applied AI extension) |
+|---|---|---|
+| **Core question** | *When* to run care tasks | *What* care advice, and *is it safe?* |
+| **Technique** | Object-oriented scheduling logic | **RAG** grounding + **safety guardrail** |
+| **Entry point** | `schedule_demo.py` (CLI) / `app.py` (UI) | **`main.py`** — `pawpal_agent(query)` |
+| **Output** | Sorted schedule + conflict report | Structured **JSON** (`status`, `confidence_score`, `retrieved_context`, `advice`) |
+| **Safety** | — | Fail-closed **toxicity guardrail** (chocolate, grapes, xylitol, …) |
+| **Observability** | `print()` | Structured **`logging`** execution trace |
+
+> **Note on `main.py`:** the original Module 2 scheduling CLI demo was
+> preserved as [schedule_demo.py](schedule_demo.py); the scheduling logic itself
+> still lives untouched in [pawpal_system.py](pawpal_system.py). `main.py` is now
+> the Applied AI System entry point.
+
+---
+
+## 2. Architecture Overview
+
+Data flow (rubric sequence): **User Query → PawPal+ Core Agent → Pet-Care RAG
+Retrieval → Safety Guardrail Evaluator → Response Output (Safe vs Blocked)**,
+with **structured logging** across every stage. RAG retrieval runs first; the
+guardrail then evaluates the query and, on a detected toxin, **overrides** the
+retrieved advice (a **fail-closed** design) with an emergency warning.
+
+Source: [diagrams/architecture.mmd](diagrams/architecture.mmd)
+
+```mermaid
+flowchart TD
+    U["👤 User Query"] --> AGENT["PawPal+ Core Agent<br/>pawpal_agent(query)"]
+
+    AGENT --> RAG["Pet-Care RAG Retrieval<br/>retrieve() over Knowledge Base<br/>cosine similarity score"]
+
+    RAG --> GUARD{"Safety &amp; Toxicity<br/>Guardrail Evaluator<br/>screen_for_toxins()"}
+
+    GUARD -- "hazard detected<br/>(chocolate, grapes, allium,<br/>xylitol, caffeine, alcohol…)" --> BLOCK["Response Formatter — BLOCKED<br/>status = BLOCKED_BY_GUARDRAIL<br/>emergency warning (overrides RAG advice)"]
+    GUARD -- "no hazard" --> THRESH{"similarity ≥<br/>RETRIEVAL_THRESHOLD?"}
+
+    THRESH -- "yes" --> SAFE["Response Formatter — SUCCESS<br/>grounded advice + retrieved_context"]
+    THRESH -- "no" --> FALLBACK["Response Formatter — SUCCESS<br/>(low confidence)<br/>safe 'consult a vet' fallback"]
+
+    BLOCK --> OUT["📦 Structured JSON Response Output<br/>status · confidence_score<br/>retrieved_context · advice"]
+    SAFE --> OUT
+    FALLBACK --> OUT
+
+    RAG -.->|reads| KB[("📚 Mock Pet-Care<br/>Knowledge Base<br/>(RAG index, 7 docs)")]
+    GUARD -.->|reads| TOX[("☠️ Toxicology<br/>Safety Index<br/>(8 toxin records)")]
+
+    AGENT -. log .-> LOG[["🪵 Structured Logging<br/>(logging module)<br/>auditable execution trace"]]
+    RAG -. log .-> LOG
+    GUARD -. log .-> LOG
+    OUT -. log .-> LOG
+
+    classDef block fill:#ffe0e0,stroke:#c0392b,color:#000;
+    classDef safe fill:#e0f5e0,stroke:#27ae60,color:#000;
+    classDef gate fill:#fff3cd,stroke:#b8860b,color:#000;
+    classDef store fill:#eef,stroke:#4169e1,color:#000;
+
+    class BLOCK block;
+    class SAFE,FALLBACK safe;
+    class GUARD,THRESH gate;
+    class KB,TOX,LOG store;
+```
+
+**Pipeline stages** (all in [main.py](main.py)):
+
+1. **Pet-Care RAG Retrieval** — `retrieve()` scores the query against a
+   7-document knowledge base using the **Otsuka–Ochiai cosine coefficient**
+   (`|A ∩ B| / √(|A|·|B|)`) over bag-of-keyword sets, returning the best
+   candidate document.
+2. **Safety & Toxicity Guardrail Evaluator** — `screen_for_toxins()` evaluates
+   the query against an 8-record toxicology index using word-boundary token
+   matching. Any hit → **`BLOCKED_BY_GUARDRAIL`**: the guardrail overrides the
+   retrieved advice with an emergency warning (the RAG candidate is preserved in
+   `metadata` for auditability).
+3. **Response Output** — if the guardrail clears, grounds advice in the
+   retrieved document, or falls back to a safe "consult a vet" response if
+   similarity is below `RETRIEVAL_THRESHOLD` (`0.15`). Always emits the
+   structured JSON contract.
+4. **Structured logging** — every stage logs an `event=… key=value` record.
+
+---
+
+## 3. Setup & Execution Instructions
+
+**Requirements:** Python 3.10+ (developed on 3.14). `main.py` uses **only the
+Python standard library** — no API keys, no network, no extra installs.
 
 ```bash
+# 1. (Optional) create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+# 2. (Optional) install the base project's Streamlit/pytest deps
 pip install -r requirements.txt
+
+# 3. Run the Applied AI System
+python main.py
 ```
 
-### Suggested workflow
+Running `python main.py` executes **two demo cases** (one safe, one toxic) and a
+**guardrail reliability self-check**, printing structured JSON to *stdout* and
+the auditable log trace to *stderr*.
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
+You can also import the agent directly:
 
-## 🖥️ Sample Output
-
-Paste a sample of your app's CLI or Streamlit output here so a reader can see what a generated plan looks like:
-
-```
-========================================
-       TODAY'S SCHEDULE - PawPal+
-========================================
-Owner : Alex
-
-  [Dog] Buddy
-  ------------------------------
-    08:00  |  Morning walk              |  Daily     |  [DONE]
-    12:00  |  Lunch feeding             |  Daily     |  [PENDING]
-    18:00  |  Evening walk              |  Daily     |  [PENDING]
-
-  [Cat] Luna
-  ------------------------------
-    08:30  |  Breakfast                 |  Daily     |  [PENDING]
-    12:00  |  Medication                |  Weekly    |  [PENDING]
-    19:00  |  Dinner                    |  Daily     |  [PENDING]
-
-========================================
-Tasks sorted by time:
-  08:00  Morning walk
-  08:30  Breakfast
-  12:00  Lunch feeding
-  12:00  Medication
-  18:00  Evening walk
-  19:00  Dinner
-
-Pending tasks : 5
-Completed tasks: 1
-
-Scheduling conflicts detected:
-  12:00  ->  Lunch feeding, Medication
-# e.g.:
-# Daily plan for Biscuit (Golden Retriever):
-#   08:00 — Morning walk (30 min) [priority: high]
-#   09:00 — Feeding (10 min) [priority: high]
-#   ...
+```python
+from main import pawpal_agent
+print(pawpal_agent("How much water should my dog drink each day?")["status"])
+# SUCCESS
 ```
 
-## 🧪 Testing PawPal+
+The original Module 2 scheduler is still runnable:
 
 ```bash
-# Run the full test suite: python -m pytest
-pytest
-
-# Run with coverage:
-pytest --cov
+python schedule_demo.py     # CLI schedule + conflict demo
+streamlit run app.py        # Streamlit UI
+pytest                      # 21 scheduling tests
 ```
 
-Sample test output:
+---
 
-```
-# Paste your pytest output here
-============================= test session starts ==============================
-platform darwin -- Python 3.14.5, pytest-9.1.1, pluggy-1.6.0 -- /Users/munshatmuhtadee/ai110-module2show-pawpal-starter/.venv/bin/python
-cachedir: .pytest_cache
-rootdir: /Users/munshatmuhtadee/ai110-module2show-pawpal-starter
-plugins: anyio-4.14.1
-collecting ... collected 21 items
+## 4. Sample Interactions & Execution Evidence
 
-tests/test_pawpal.py::TestSortByTime::test_basic_reverse_order_becomes_ascending PASSED [  4%]
-tests/test_pawpal.py::TestSortByTime::test_already_sorted_stays_the_same PASSED [  9%]
-tests/test_pawpal.py::TestSortByTime::test_single_task_returns_one_element_list PASSED [ 14%]
-tests/test_pawpal.py::TestSortByTime::test_no_tasks_returns_empty_list PASSED [ 19%]
-tests/test_pawpal.py::TestSortByTime::test_tasks_interleaved_across_multiple_pets PASSED [ 23%]
-tests/test_pawpal.py::TestSortByTime::test_midnight_boundary_sorts_correctly PASSED [ 28%]
-tests/test_pawpal.py::TestSortByTime::test_all_tasks_at_same_time_all_present_in_result PASSED [ 33%]
-tests/test_pawpal.py::TestRecurrenceLogic::test_daily_task_next_occurrence_is_tomorrow PASSED [ 38%]
-tests/test_pawpal.py::TestRecurrenceLogic::test_daily_task_rolls_over_month_boundary PASSED [ 42%]
-tests/test_pawpal.py::TestRecurrenceLogic::test_weekly_task_next_occurrence_is_seven_days_later PASSED [ 47%]
-tests/test_pawpal.py::TestRecurrenceLogic::test_generate_next_occurrence_does_not_mutate_original PASSED [ 52%]
-tests/test_pawpal.py::TestRecurrenceLogic::test_unsupported_frequency_raises_value_error PASSED [ 57%]
-tests/test_pawpal.py::TestRecurrenceLogic::test_generate_next_occurrence_on_incomplete_task_still_works PASSED [ 61%]
-tests/test_pawpal.py::TestDetectConflicts::test_no_conflicts_when_all_times_unique PASSED [ 66%]
-tests/test_pawpal.py::TestDetectConflicts::test_single_task_no_conflict PASSED [ 71%]
-tests/test_pawpal.py::TestDetectConflicts::test_no_tasks_returns_empty PASSED [ 76%]
-tests/test_pawpal.py::TestDetectConflicts::test_two_tasks_same_time_flagged_as_one_conflict_group PASSED [ 80%]
-tests/test_pawpal.py::TestDetectConflicts::test_three_tasks_same_time_one_group_of_three PASSED [ 85%]
-tests/test_pawpal.py::TestDetectConflicts::test_two_separate_conflict_groups_both_returned PASSED [ 90%]
-tests/test_pawpal.py::TestDetectConflicts::test_cross_pet_conflict_is_detected PASSED [ 95%]
-tests/test_pawpal.py::TestDetectConflicts::test_completing_a_task_does_not_remove_it_from_conflict_detection PASSED [100%]
+Captured verbatim from `python main.py`. (JSON is emitted with
+`ensure_ascii=False`, so non-ASCII characters such as `—` and `⚠️` render as
+readable UTF-8.)
 
-============================== 21 passed in 0.01s ==============================
+### 4a. Safe query → `SUCCESS` (RAG-grounded)
 
-Confidence level: 5/5
+**Input:** `"What's a good daily exercise routine for a Labrador?"`
+
+```json
+{
+  "query": "What's a good daily exercise routine for a Labrador?",
+  "status": "SUCCESS",
+  "confidence_score": 0.471,
+  "retrieved_context": "[KB-EXERCISE-01] Daily exercise routines for dogs: Adult dogs generally need 30-120 minutes of exercise per day depending on breed and age. High-energy working breeds such as Labrador Retrievers do best with two walks per day plus active play (fetch, tug, or swimming). Split activity into a morning and an evening session, provide water breaks, and avoid strenuous exercise during peak afternoon heat.",
+  "advice": "Adult dogs generally need 30-120 minutes of exercise per day depending on breed and age. High-energy working breeds such as Labrador Retrievers do best with two walks per day plus active play (fetch, tug, or swimming). Split activity into a morning and an evening session, provide water breaks, and avoid strenuous exercise during peak afternoon heat. (Source: KB-EXERCISE-01 — Daily exercise routines for dogs.) This is general guidance; for concerns specific to your pet, consult a licensed veterinarian.",
+  "metadata": {
+    "stage": "rag_grounded",
+    "matched_document": "KB-EXERCISE-01"
+  }
+}
 ```
 
-## 📐 Smarter Scheduling
+### 4b. Unsafe query → `BLOCKED_BY_GUARDRAIL` (chocolate)
 
-| Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Task sorting | `Scheduler.sort_by_time()` | Returns all tasks across all pets sorted chronologically by `"HH:MM"` string. Works correctly because lexicographic order matches time order for zero-padded 24-hour strings. |
-| Filtering | `Scheduler.filter_by_status(status: bool)` | Pass `True` for completed tasks, `False` for pending. Returns a flat list across all pets. |
-| Filtering | `Scheduler.filter_by_pet(pet_name: str)` | Returns only the tasks belonging to the named pet. Returns `[]` if the pet is not found. |
-| Conflict detection | `Scheduler.detect_conflicts()` | Groups all tasks by their `"HH:MM"` time slot and returns a list of groups where two or more tasks share the exact same time. Returns `[]` if no conflicts exist. |
-| Recurring tasks | `Task.frequency` (`"Daily"` / `"Weekly"`) | Frequency is stored on each `Task`. The next step is `Scheduler.complete_and_reschedule(pet, task)` to auto-generate the next occurrence when a recurring task is marked done. |
+**Input:** `"Can I give my dog chocolate as a treat?"`
 
-## 📸 Demo Walkthrough
+```json
+{
+  "query": "Can I give my dog chocolate as a treat?",
+  "status": "BLOCKED_BY_GUARDRAIL",
+  "confidence_score": 0.99,
+  "retrieved_context": "[TOX-Chocolate] severity=severe; affects dogs and cats; theobromine and caffeine (methylxanthine) toxicity; watch for vomiting, diarrhea, restlessness, rapid heart rate, tremors, seizures.",
+  "advice": "⚠️ SAFETY ALERT — Chocolate is toxic to pets and must NOT be given to your animal. If your pet may have already ingested it, treat this as an emergency: contact your veterinarian or the ASPCA Animal Poison Control Center (888-426-4435) immediately, and do not wait for symptoms to appear. Watch for: vomiting, diarrhea, restlessness, rapid heart rate, tremors, seizures.",
+  "metadata": {
+    "stage": "safety_guardrail",
+    "detected_hazards": ["Chocolate"],
+    "severity": ["severe"],
+    "rag_candidate": { "doc_id": "KB-HYDRATION-01", "similarity": 0.167 }
+  }
+}
+```
 
-Follow these steps to explore every feature of PawPal+ from a fresh launch:
+The `rag_candidate` field records that RAG retrieval ran **first** (per the
+rubric sequence) and what it found, before the guardrail overrode the advice.
 
-1. **Launch the app.** Run `streamlit run app.py` in your terminal. The browser opens to the PawPal+ home screen, which starts with a default owner ("Jordan") and one pet ("Mochi the Dog") already in session state so you have something to work with immediately.
+### 4c. Structured log trace (stderr)
 
-2. **Add a second pet.** In the **Add a Pet** section, type a name (e.g. `Luna`) and select a species (`Cat`), then click **Add Pet**. A green success banner confirms the addition, and the "Current pets" line below updates to show both pets.
+Note the execution order — `rag_retrieved` fires **before** `guardrail_*` in
+both cases:
 
-3. **Schedule tasks for your first pet.** In the **Add a Task** section, choose `Mochi` from the pet dropdown, enter a description (`Morning walk`), a time (`08:00`), and a frequency (`Daily`), then click **Add Task**. Repeat to add a second task — try `Lunch feeding` at `12:00`.
+```text
+2026-07-24T00:00:05 | INFO     | pawpal.agent | event=query_received query="What's a good daily exercise routine for a Labrador?"
+2026-07-24T00:00:05 | INFO     | pawpal.agent | event=rag_retrieved doc_id="KB-EXERCISE-01" title="Daily exercise routines for dogs" similarity=0.471
+2026-07-24T00:00:05 | INFO     | pawpal.agent | event=guardrail_passed similarity=0.471
+2026-07-24T00:00:05 | INFO     | pawpal.agent | event=pipeline_complete status="SUCCESS" confidence=0.471
+2026-07-24T00:00:05 | INFO     | pawpal.agent | event=query_received query="Can I give my dog chocolate as a treat?"
+2026-07-24T00:00:05 | INFO     | pawpal.agent | event=rag_retrieved doc_id="KB-HYDRATION-01" title="Hydration and water intake" similarity=0.167
+2026-07-24T00:00:05 | WARNING  | pawpal.agent | event=guardrail_blocked detected=["Chocolate"] matched_terms=["chocolate"] confidence=0.99
+2026-07-24T00:00:05 | INFO     | pawpal.agent | event=pipeline_complete status="BLOCKED_BY_GUARDRAIL" confidence=0.99
+```
 
-4. **Schedule tasks for your second pet.** Switch the pet dropdown to `Luna` and add a task at the same time as one of Mochi's tasks — for example, `Medication` at `12:00` with frequency `Weekly`. This deliberately creates a scheduling conflict you will see in the next step.
+---
 
-5. **Generate the schedule.** Scroll to the **Today's Schedule** section and click **Generate Schedule**. The table renders all tasks sorted chronologically by time across both pets, so `08:00` appears before `12:00` regardless of the order tasks were entered.
+## 5. Reliability & Testing Summary
 
-6. **Observe the conflict warning.** Because Mochi's `Lunch feeding` and Luna's `Medication` are both at `12:00`, a yellow `⚠️ Scheduling conflicts detected:` banner appears immediately below the table. It lists the conflicting time slot and the names of the clashing tasks so you know exactly what needs to be rescheduled.
+`run_reliability_check()` evaluates the guardrail against a **14-case labeled
+test set** (9 toxic queries that must block, 5 safe queries that must pass).
+Verbatim output from `python main.py`:
 
-7. **Resolve the conflict.** Add a replacement task for one of the conflicting pets at a different time (e.g. move `Medication` to `12:30`), then click **Generate Schedule** again. The warning disappears and a green `✅ No conflicts detected.` message confirms the schedule is clean.
+```json
+{
+  "total_cases": 14,
+  "overall_accuracy": 1.0,
+  "toxin_block_rate": 1.0,
+  "toxins_blocked": "9/9",
+  "false_positive_rate": 0.0,
+  "safe_queries_passed": "5/5",
+  "knowledge_base_size": 7,
+  "toxin_index_size": 8
+}
+```
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->
+### Guardrail reliability
+
+| Metric | Result | Notes |
+|---|---|---|
+| Toxin block rate | **100% (9/9)** | chocolate, grapes, garlic, xylitol, onions, macadamia, coffee, alcohol, avocado |
+| False-positive rate | **0% (0/5)** | exercise, grooming, hydration, vaccination, enrichment queries all pass |
+| Overall accuracy | **100% (14/14)** | on the labeled test set |
+| Detection confidence | 0.90 – 0.99 | per-toxin, scaled by how well-established the hazard is |
+
+### RAG performance
+
+| Metric | Result | Notes |
+|---|---|---|
+| Knowledge base size | 7 documents | exercise, diet, hydration, grooming, dental, vet, enrichment |
+| Similarity metric | Otsuka–Ochiai cosine | `|A ∩ B| / √(|A|·|B|)` over keyword sets, range `[0, 1]` |
+| Retrieval threshold | 0.15 | below → safe low-confidence "consult a vet" fallback |
+| Safe-query match | 0.471 | exercise query → `KB-EXERCISE-01` (correct document) |
+| Determinism | 100% reproducible | pure stdlib; identical output on every run |
+
+> **Scope of these numbers.** 100% accuracy is measured on a small, curated
+> in-repo test set — it demonstrates the guardrail works on its target toxins,
+> **not** that it is exhaustive. Real-world limits are documented in
+> [model_card.md](model_card.md).
+
+---
+
+## Project files
+
+| File | Role |
+|---|---|
+| [main.py](main.py) | Applied AI System: RAG + guardrail + `pawpal_agent()` pipeline |
+| [diagrams/architecture.mmd](diagrams/architecture.mmd) | System data-flow diagram (Mermaid source) |
+| [model_card.md](model_card.md) | Limitations, misuse mitigation, reliability, AI-collaboration reflection |
+| [ai_interactions.md](ai_interactions.md) | Auditable reasoning steps, prompt structures, guardrail decision traces |
+| [pawpal_system.py](pawpal_system.py) | Module 2 scheduling domain model (unchanged) |
+| [schedule_demo.py](schedule_demo.py) | Preserved Module 2 scheduling CLI demo |
+| [app.py](app.py) | Module 2 Streamlit UI |
+| [tests/test_pawpal.py](tests/test_pawpal.py) | Module 2 scheduling test suite (21 tests) |
+
+---
+
+## ⚠️ Disclaimer
+
+PawPal+ is an educational demonstration, **not** veterinary software. Its advice
+is general and its knowledge base is a small mock. For any real concern about a
+pet's health — especially suspected poisoning — contact a licensed veterinarian
+or the **ASPCA Animal Poison Control Center (888-426-4435)** immediately.

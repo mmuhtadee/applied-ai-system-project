@@ -1,0 +1,48 @@
+%% PawPal+ Applied AI System — data flow
+%% Project 4: "Show What You Know: Applied AI System" (CodePath AI110)
+%%
+%% Rubric sequence: Query -> RAG Retrieval -> Guardrail Evaluator -> Response
+%% Output. RAG retrieval runs first; the Safety Guardrail then evaluates the
+%% query and, if a toxin is detected, OVERRIDES the retrieved advice
+%% (fail-closed) with an emergency warning. Every stage emits a structured log
+%% record for auditability.
+
+flowchart TD
+    U["👤 User Query"] --> AGENT["PawPal+ Core Agent<br/>pawpal_agent(query)"]
+
+    %% Stage 1 — RAG retrieval (runs first)
+    AGENT --> RAG["Pet-Care RAG Retrieval<br/>retrieve() over Knowledge Base<br/>cosine similarity score"]
+
+    %% Stage 2 — Safety guardrail evaluation
+    RAG --> GUARD{"Safety &amp; Toxicity<br/>Guardrail Evaluator<br/>screen_for_toxins()"}
+
+    GUARD -- "hazard detected<br/>(chocolate, grapes, allium,<br/>xylitol, caffeine, alcohol…)" --> BLOCK["Response Formatter — BLOCKED<br/>status = BLOCKED_BY_GUARDRAIL<br/>emergency warning (overrides RAG advice)"]
+    GUARD -- "no hazard" --> THRESH{"similarity ≥<br/>RETRIEVAL_THRESHOLD?"}
+
+    %% Stage 3 — response output
+    THRESH -- "yes" --> SAFE["Response Formatter — SUCCESS<br/>grounded advice + retrieved_context"]
+    THRESH -- "no" --> FALLBACK["Response Formatter — SUCCESS<br/>(low confidence)<br/>safe 'consult a vet' fallback"]
+
+    BLOCK --> OUT["📦 Structured JSON Response Output<br/>status · confidence_score<br/>retrieved_context · advice"]
+    SAFE --> OUT
+    FALLBACK --> OUT
+
+    %% Knowledge sources
+    RAG -.->|reads| KB[("📚 Mock Pet-Care<br/>Knowledge Base<br/>(RAG index, 7 docs)")]
+    GUARD -.->|reads| TOX[("☠️ Toxicology<br/>Safety Index<br/>(8 toxin records)")]
+
+    %% Cross-cutting: structured logging on every stage
+    AGENT -. log .-> LOG[["🪵 Structured Logging<br/>(logging module)<br/>auditable execution trace"]]
+    RAG -. log .-> LOG
+    GUARD -. log .-> LOG
+    OUT -. log .-> LOG
+
+    classDef block fill:#ffe0e0,stroke:#c0392b,color:#000;
+    classDef safe fill:#e0f5e0,stroke:#27ae60,color:#000;
+    classDef gate fill:#fff3cd,stroke:#b8860b,color:#000;
+    classDef store fill:#eef,stroke:#4169e1,color:#000;
+
+    class BLOCK block;
+    class SAFE,FALLBACK safe;
+    class GUARD,THRESH gate;
+    class KB,TOX,LOG store;
